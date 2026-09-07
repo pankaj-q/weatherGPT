@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import re
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -11,7 +12,6 @@ st.set_page_config(
 # --- Theme-Adaptive CSS (Dark & Light Mode Safe) ---
 st.markdown("""
     <style>
-    /* Metric Card Styling */
     .metric-card {
         background-color: var(--secondary-background-color, #f1f5f9);
         color: var(--text-color, #0f172a);
@@ -30,7 +30,6 @@ st.markdown("""
         font-weight: 500;
     }
 
-    /* Insight Card Styling */
     .insight-box {
         border-radius: 10px;
         padding: 16px 20px;
@@ -61,7 +60,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- Geocoding Helper: City Name -> Lat/Lon ---
+# --- Helper: Geocoding (City Name -> Coordinates) ---
 @st.cache_data(show_spinner=False, ttl=3600)
 def geocode_city(city_name):
     url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=en&format=json"
@@ -72,9 +71,9 @@ def geocode_city(city_name):
             return item["latitude"], item["longitude"], f"{item['name']}, {item.get('admin1', item.get('country', ''))}"
     except Exception:
         pass
-    return 28.9845, 77.7064, "Meerut, Uttar Pradesh"  # Fallback
+    return 28.9845, 77.7064, "Meerut, Uttar Pradesh"
 
-# --- Live Telemetry Fetcher ---
+# --- Helper: Fetch Live Telemetry ---
 def get_live_weather(lat, lon):
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,weather_code&forecast_days=1"
     try:
@@ -90,13 +89,52 @@ def get_live_weather(lat, lon):
     except Exception:
         return {"temp": 28, "humidity": 60, "rain": 0.0, "wind": 12, "code": 0}
 
+# --- Intelligent Location & Language Extractor from Prompt ---
+def extract_location_from_query(query):
+    # Common Indian cities/districts list for fast entity matching
+    known_cities = [
+        "delhi", "mumbai", "meerut", "lucknow", "patna", "bhopal", "jaipur", "punjab", 
+        "chandigarh", "pune", "nagpur", "varanasi", "kanpur", "kolkata", "chennai", 
+        "hyderabad", "bengaluru", "ahmedabad", "surat", "ranchi", "shimla", "dehradun"
+    ]
+    words = re.findall(r'\b[A-Za-z]+\b', query.lower())
+    for w in words:
+        if w in known_cities:
+            return w.capitalize()
+    
+    # Regex fallback for patterns like "in <City>" or "<City> me"
+    match = re.search(r'(?:in|at|near|for|around)\s+([A-Za-z]+)', query, re.IGNORECASE)
+    if match:
+        candidate = match.group(1).capitalize()
+        if candidate.lower() not in ["the", "my", "our", "today", "tomorrow"]:
+            return candidate
+            
+    match_hindi = re.search(r'([A-Za-z]+)\s+(?:me|mein|mai|ka|ki|ke)', query, re.IGNORECASE)
+    if match_hindi:
+        candidate = match_hindi.group(1).capitalize()
+        if candidate.lower() not in ["aaj", "kal", "fasal", "khet", "pani"]:
+            return candidate
+
+    return None
+
+def detect_language(query):
+    q = query.lower()
+    # Check for Devanagari script
+    if re.search(r'[\u0900-\u097F]', query):
+        return "hindi"
+    # Check for common Hinglish cues
+    hinglish_words = ["kya", "hai", "hoga", "hogi", "barish", "sinchai", "paani", "khet", "taapman", "mausam", "batao", "aaj", "kal", "spray", "chhidkav"]
+    if any(w in q.split() for w in hinglish_words):
+        return "hinglish"
+    return "english"
+
 # --- State Initialization ---
-if "location_name" not in st.session_state:
-    st.session_state.location_name = "Meerut"
+if "current_city" not in st.session_state:
+    st.session_state.current_city = "Meerut"
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Namaste! Main WeatherGPT hoon. Aap mujhse mausam, fasal ki sinchai, keetnashak chhidkav ya disaster alerts ke bare me pooch sakte hain."}
+        {"role": "assistant", "content": "Namaste! Main WeatherGPT hoon. Just ask your query naturally in Hindi, English, or any language (e.g., *'Kya Pune me kal barish hogi?'* or *'Is it safe to spray pesticides in Meerut?'*)."}
     ]
 
 if "current_insights" not in st.session_state:
@@ -105,111 +143,141 @@ if "current_insights" not in st.session_state:
         "irrigation": "✅ Regular morning irrigation is safe.",
         "spraying": "✅ Safe window available (Low wind & no immediate rain).",
         "risk_level": "Low / Normal",
-        "action": "Proceed with regular field operations."
+        "action": "Proceed with standard field operations."
     }
 
-# --- Dynamic Reasoning Engine ---
-def analyze_query(query, weather, location_str):
+# --- Core Dynamic Decision Engine ---
+def process_user_query(query):
+    # 1. Update location if detected
+    detected_city = extract_location_from_query(query)
+    if detected_city:
+        st.session_state.current_city = detected_city
+
+    # 2. Fetch fresh weather
+    lat, lon, resolved_city = geocode_city(st.session_state.current_city)
+    weather = get_live_weather(lat, lon)
+    
+    # 3. Detect language
+    lang = detect_language(query)
+    
     q = query.lower()
     temp = weather["temp"]
     rain = weather["rain"]
     wind = weather["wind"]
+    hum = weather["humidity"]
 
-    # 1. Irrigation / Paani
-    if any(k in q for k in ["paani", "sinchai", "irrigate", "irrigation", "water"]):
-        if rain > 0.5 or weather["humidity"] > 80:
-            reply = f"📍 **{location_str}**: Aane wale ghanton me barish ({rain}mm) aur high humidity ({weather['humidity']}%) ki sambhavna hai. Fasal me sinchai **24-48 ghante ke liye taal dein** taaki waterlogging na ho."
+    # Irrigation / Water Query
+    if any(k in q for k in ["paani", "pani", "sinchai", "irrigate", "irrigation", "water"]):
+        if rain > 0.5 or hum > 80:
+            if lang in ["hindi", "hinglish"]:
+                reply = f"📍 **{resolved_city}**: Agle 24-48 ghanton me barish ({rain}mm) aur high humidity ({hum}%) ki sambhavna hai. Fasal me **sinchai abhi taal dein** taaki paani bharne se jadon ko nuksan na ho."
+            else:
+                reply = f"📍 **{resolved_city}**: Rain ({rain}mm) and high humidity ({hum}%) expected in the next 24-48 hours. **Postpone irrigation** to avoid waterlogging and root damage."
+            
             insights = {
                 "status": "Warning",
                 "risk_level": "High Rain Risk",
-                "irrigation": "🚫 DO NOT irrigate (Prevents root rotting & waterlogging).",
-                "spraying": "🧪 Postpone spraying (Risk of chemical washout).",
-                "action": "Check drainage channels in low-lying fields."
+                "irrigation": "🚫 DO NOT irrigate (Risk of field waterlogging).",
+                "spraying": "🧪 Postpone chemical spraying (Washout hazard).",
+                "action": "Inspect low-lying field drainage channels."
             }
         else:
-            reply = f"📍 **{location_str}**: Mausam shushk hai aur taapman {temp}°C hai. Subah ya shaam ke samay sinchai karna **puri tarah surakshit** hai."
+            if lang in ["hindi", "hinglish"]:
+                reply = f"📍 **{resolved_city}**: Mausam shushk hai aur taapman {temp}°C hai. Subah ke samay sinchai karna **puri tarah anukool aur surakshit** hai."
+            else:
+                reply = f"📍 **{resolved_city}**: Weather is clear with a temperature of {temp}°C. Morning irrigation is **completely safe and recommended**."
+            
             insights = {
                 "status": "Safe",
                 "risk_level": "Normal Conditions",
-                "irrigation": "✅ Safe to irrigate during early morning/evening.",
-                "spraying": "✅ Good conditions for nutrient/fertilizer application.",
+                "irrigation": "✅ Safe to irrigate in morning/evening.",
+                "spraying": "✅ Safe window for nutrient application.",
                 "action": "Maintain routine soil moisture checks."
             }
 
-    # 2. Pesticide / Chemical Spraying
-    elif any(k in q for k in ["spray", "keetnashak", "fertilizer", "dawa", "chemical"]):
+    # Pesticide / Spraying Query
+    elif any(k in q for k in ["spray", "keetnashak", "fertilizer", "dawa", "chemical", "pesticide"]):
         if wind > 18:
-            reply = f"📍 **{location_str}**: Hawa ki gati tez ({wind} km/h) hai. Is gati par spray hawa ke sath udkar barbaad hoga. **Chhidkav abhi rok dein** jab tak hawa shant na ho."
+            if lang in ["hindi", "hinglish"]:
+                reply = f"📍 **{resolved_city}**: Hawa ki gati tez ({wind} km/h) hai. Dawa hawa ke sath udkar barbaad hogi. **Chhidkav abhi rok dein**."
+            else:
+                reply = f"📍 **{resolved_city}**: High wind speed detected ({wind} km/h). **Halt chemical spraying** to prevent wind drift and chemical wastage."
+            
             insights = {
                 "status": "Caution",
                 "risk_level": "High Wind Drift Alert",
-                "irrigation": "✅ Irrigation can proceed normally.",
-                "spraying": "🚫 STOP chemical spray (High wind drift risk).",
-                "action": "Wait for wind speeds to drop below 15 km/h."
+                "irrigation": "✅ Irrigation can continue normally.",
+                "spraying": "🚫 STOP chemical spraying (Wind speed > 15 km/h).",
+                "action": "Wait for wind speeds to subside."
             }
         else:
-            reply = f"📍 **{location_str}**: Hawa ki gati anukool ({wind} km/h) hai aur barish ka koi khatra nahi hai. Keetnashak ya tonic ka spray **safalta-poorvak kiya ja sakta hai**."
+            if lang in ["hindi", "hinglish"]:
+                reply = f"📍 **{resolved_city}**: Hawa ki gati anukool ({wind} km/h) hai aur barish ka koi khatra nahi hai. Keetnashak chhidkav **safalta-poorvak kiya ja sakta hai**."
+            else:
+                reply = f"📍 **{resolved_city}**: Favorable wind speed ({wind} km/h) with zero rain risk. **Pesticide application window is fully open**."
+            
             insights = {
                 "status": "Safe",
                 "risk_level": "Favorable Spray Window",
                 "irrigation": "✅ Normal schedule.",
                 "spraying": "✅ Excellent spraying window active.",
-                "action": "Use personal protective equipment during spray."
+                "action": "Use standard safety protective gear."
             }
 
-    # 3. Storm / Disaster / Flood Alerts
+    # Rain / Storm / Weather Alerts
     elif any(k in q for k in ["storm", "toofan", "barish", "flood", "alert", "baarish", "rain"]):
-        if rain > 1.0 or wind > 25:
-            reply = f"🚨 **Weather Alert for {location_str}**: Kadi barish/tez hawaon ({wind} km/h) ki sambhavna hai. Kheti ke upkaran surakshit sthan par rakhein aur khet me na jayein."
+        if rain > 0.8 or wind > 25:
+            if lang in ["hindi", "hinglish"]:
+                reply = f"🚨 **Severe Weather Alert ({resolved_city})**: Bhari barish/tez aandhi ({wind} km/h) ki aashanka hai. Khet ke upkaran surakshit karein aur khet me na jayein."
+            else:
+                reply = f"🚨 **Severe Weather Alert ({resolved_city})**: Heavy rain/high winds ({wind} km/h) expected. Secure livestock and field machinery immediately."
+            
             insights = {
                 "status": "Warning",
-                "risk_level": "Severe Weather Alert",
-                "irrigation": "🚫 Halt all irrigation and electrical pumps.",
-                "spraying": "🚫 Strict hold on all pesticide applications.",
-                "action": "Secure livestock and clear drainage blockages."
+                "risk_level": "Severe Weather Warning",
+                "irrigation": "🚫 Halt all irrigation pumps immediately.",
+                "spraying": "🚫 Strict ban on all chemical spraying.",
+                "action": "Clear drainage blockages and secure equipment."
             }
         else:
-            reply = f"📍 **{location_str}**: Agle 24 ghanton me koi gambhir toofan ya bhari barish ki chetavni nahi hai. Halaki badal ban sakte hain."
+            if lang in ["hindi", "hinglish"]:
+                reply = f"📍 **{resolved_city}**: Agle 24 ghanton me kisi gambhir toofan ya bhari barish ki chetavni nahi hai. Mausam sthir hai."
+            else:
+                reply = f"📍 **{resolved_city}**: No severe storm or flood warnings for the next 24 hours. Weather conditions are stable."
+            
             insights = {
                 "status": "Safe",
                 "risk_level": "Low Hazard",
                 "irrigation": "✅ Standard routine.",
-                "spraying": "✅ Safe window.",
-                "action": "Monitor daily updates."
+                "spraying": "✅ Safe window open.",
+                "action": "Monitor daily regional forecasts."
             }
 
-    # 4. Temperature / General Weather
+    # General Weather / Fallback
     else:
-        reply = f"📍 **{location_str} ka Taaza Mausam**: Taapman **{temp}°C**, Hawa ki gati **{wind} km/h**, Humidity **{weather['humidity']}%**, aur Precipitation **{rain} mm** hai."
+        if lang in ["hindi", "hinglish"]:
+            reply = f"📍 **{resolved_city} Live Update**: Taapman **{temp}°C**, Hawa **{wind} km/h**, Nami (Humidity) **{hum}%**, aur Barish **{rain} mm** hai."
+        else:
+            reply = f"📍 **{resolved_city} Live Update**: Temperature is **{temp}°C**, Wind is **{wind} km/h**, Humidity is **{hum}%**, and Precipitation is **{rain} mm**."
+        
         insights = {
             "status": "Safe",
             "risk_level": "Normal Field Weather",
-            "irrigation": "✅ Regular morning schedule.",
-            "spraying": "✅ Normal spray window open.",
-            "action": "Routine farming activities can continue."
+            "irrigation": "✅ Routine morning irrigation safe.",
+            "spraying": "✅ Normal spraying window open.",
+            "action": "Standard field maintenance active."
         }
 
-    return reply, insights
+    return reply, insights, resolved_city, weather
 
-# --- Header Section ---
-col_head1, col_head2, col_head3 = st.columns([3, 1, 1.2])
-with col_head1:
-    st.title("🌤️ WeatherGPT")
-    st.caption("AI-Powered Meteorological Intelligence & Agricultural Decision Support")
-with col_head2:
-    selected_lang = st.selectbox("🌐 Language", ["Hindi (हिन्दी)", "English", "Punjabi", "Tamil", "Bengali"])
-with col_head3:
-    # Location input tied directly to session_state so it never resets
-    user_loc = st.text_input("📍 Location", value=st.session_state.location_name)
-    if user_loc != st.session_state.location_name:
-        st.session_state.location_name = user_loc
-        st.rerun()
-
-# Fetch live coordinates & telemetry
-lat, lon, resolved_city_name = geocode_city(st.session_state.location_name)
-weather_data = get_live_weather(lat, lon)
-
+# --- Clean Header (No Options/Dropdowns) ---
+st.title("🌤️ WeatherGPT")
+st.caption("Zero-Barrier Meteorological AI — Auto-detects location & language directly from your conversational prompt.")
 st.divider()
+
+# Get coordinates and telemetry for the current active city
+lat, lon, resolved_city_name = geocode_city(st.session_state.current_city)
+weather_data = get_live_weather(lat, lon)
 
 # --- Main Dual-Panel Grid Layout ---
 left_panel, right_panel = st.columns([1.1, 0.9], gap="large")
@@ -220,19 +288,19 @@ left_panel, right_panel = st.columns([1.1, 0.9], gap="large")
 with left_panel:
     st.subheader("💬 Conversational Assistant")
     
-    chat_container = st.container(height=430)
+    chat_container = st.container(height=440)
     with chat_container:
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-    user_input = st.chat_input("Poochiye (e.g., Kya kal fasal me sinchai karein? ya Barish kab hogi?)...")
+    user_input = st.chat_input("Ask anything (e.g., 'Kya Lucknow me kal barish hogi?' or 'Can I spray pesticides in Jaipur?')...")
 
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
         
-        # Analyze intent & generate dynamic response and insights
-        ai_reply, new_insights = analyze_query(user_input, weather_data, resolved_city_name)
+        # Analyze prompt, infer location & language, update insights
+        ai_reply, new_insights, resolved_city_name, weather_data = process_user_query(user_input)
         
         st.session_state.current_insights = new_insights
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
@@ -242,9 +310,9 @@ with left_panel:
 # RIGHT PANEL: Live Telemetry & Insights
 # ==========================================
 with right_panel:
-    st.subheader(f"📊 Live Telemetry ({resolved_city_name})")
+    st.subheader(f"📊 Live Telemetry & Insights ({resolved_city_name})")
 
-    # 1. Metric Cards (Theme Adaptive)
+    # 1. Real-Time Metric Cards
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.markdown(f"<div class='metric-card'>🌡️<br><b>{weather_data['temp']}°C</b><br><small>Temp</small></div>", unsafe_allow_html=True)
@@ -257,7 +325,7 @@ with right_panel:
 
     st.write("")
 
-    # 2. Dynamic Actionable Insight Card
+    # 2. Dynamic Actionable Insight Card (Updated Post-Response)
     st.markdown("#### 💡 Actionable Agro-Advisory")
     insights = st.session_state.current_insights
 
@@ -276,9 +344,9 @@ with right_panel:
 
     st.write("")
     
-    # 3. Mass Alert Action Button
-    if st.button("🚨 Broadcast Advisory to Regional Farmer WhatsApp Groups", use_container_width=True):
-        st.success(f"✅ Advisory successfully dispatched to registered farmers in {resolved_city_name} cluster.")
+    # 3. Mass Broadcast Trigger
+    if st.button(f"🚨 Broadcast Advisory to Registered Farmers ({resolved_city_name})", use_container_width=True):
+        st.success(f"✅ Advisory successfully dispatched to farmer WhatsApp groups in {resolved_city_name} cluster.")
 
 # import os
 # from dotenv import load_dotenv
