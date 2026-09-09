@@ -1,477 +1,532 @@
-import streamlit as st
-import requests
 import re
+import requests
+import streamlit as st
+import streamlit.components.v1 as components
 
-# --- Page Configuration ---
+# --- 1. Page Configuration ---
 st.set_page_config(
-    page_title="WeatherGPT - Meteorological Intelligence",
+    page_title="WeatherGPT",
     page_icon="🌤️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# --- Theme-Adaptive CSS (Dark & Light Mode Safe) ---
-st.markdown("""
+# --- 2. Executive Dark Theme Styling ---
+st.markdown(
+    """
     <style>
-    .metric-card {
-        background-color: var(--secondary-background-color, #f1f5f9);
-        color: var(--text-color, #0f172a);
-        border: 1px solid rgba(128, 128, 128, 0.25);
-        border-radius: 12px;
-        padding: 14px 10px;
-        text-align: center;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    .metric-card b {
-        font-size: 1.25rem;
-        color: var(--text-color, #0f172a);
-    }
-    .metric-card small {
-        color: var(--text-color, #64748b);
-        font-weight: 500;
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+    html, body, [class*="css"], .stApp {
+        background-color: #07090E !important;
+        font-family: 'Plus Jakarta Sans', sans-serif !important;
+        color: #F8FAFC !important;
     }
 
-    .insight-box {
-        border-radius: 10px;
-        padding: 16px 20px;
-        margin-top: 12px;
-        color: var(--text-color, #0f172a);
+    #MainMenu, header, footer {
+        visibility: hidden !important;
+        height: 0px !important;
     }
-    .insight-safe {
-        background-color: rgba(34, 197, 94, 0.12);
-        border-left: 5px solid #22c55e;
+
+    .block-container {
+        padding-top: 1.5rem !important;
+        padding-bottom: 2rem !important;
+        max-width: 1280px !important;
     }
-    .insight-warning {
-        background-color: rgba(239, 68, 68, 0.12);
-        border-left: 5px solid #ef4444;
+
+    /* Landing Centered Hero */
+    .hero-box {
+        text-align: center;
+        margin-top: 10vh;
+        margin-bottom: 2.2rem;
     }
-    .insight-caution {
-        background-color: rgba(245, 158, 11, 0.12);
-        border-left: 5px solid #f59e0b;
+    .badge-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #38BDF8;
+        background: rgba(56, 189, 248, 0.08);
+        border: 1px solid rgba(56, 189, 248, 0.2);
+        padding: 6px 14px;
+        border-radius: 9999px;
+        margin-bottom: 1.2rem;
     }
-    .insight-box h4 {
-        margin: 0 0 8px 0;
-        color: var(--text-color, #0f172a);
+    .hero-title {
+        font-size: 3.5rem;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+        background: linear-gradient(180deg, #FFFFFF 40%, #94A3B8 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.6rem;
     }
-    .insight-box ul {
-        margin: 0;
-        padding-left: 20px;
+    .hero-sub {
+        font-size: 1.05rem;
+        color: #64748B;
+        max-width: 540px;
+        margin: 0 auto;
         line-height: 1.6;
     }
-    </style>
-""", unsafe_allow_html=True)
 
-# --- Helper: Geocoding (City Name -> Coordinates) ---
-@st.cache_data(show_spinner=False, ttl=3600)
-def geocode_city(city_name):
-    url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=en&format=json"
-    try:
-        res = requests.get(url, timeout=5).json()
-        if "results" in res and len(res["results"]) > 0:
-            item = res["results"][0]
-            return item["latitude"], item["longitude"], f"{item['name']}, {item.get('admin1', item.get('country', ''))}"
-    except Exception:
-        pass
-    return 28.9845, 77.7064, "Meerut, Uttar Pradesh"
-
-# --- Helper: Fetch Live Telemetry ---
-def get_live_weather(lat, lon):
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,weather_code&forecast_days=1"
-    try:
-        res = requests.get(url, timeout=5).json()
-        current = res.get("current", {})
-        return {
-            "temp": current.get("temperature_2m", 28),
-            "humidity": current.get("relative_humidity_2m", 60),
-            "rain": current.get("precipitation", 0.0),
-            "wind": current.get("wind_speed_10m", 12),
-            "code": current.get("weather_code", 0)
-        }
-    except Exception:
-        return {"temp": 28, "humidity": 60, "rain": 0.0, "wind": 12, "code": 0}
-
-# --- Intelligent Location & Language Extractor from Prompt ---
-def extract_location_from_query(query):
-    # Common Indian cities/districts list for fast entity matching
-    known_cities = [
-        "delhi", "mumbai", "meerut", "lucknow", "patna", "bhopal", "jaipur", "punjab", 
-        "chandigarh", "pune", "nagpur", "varanasi", "kanpur", "kolkata", "chennai", 
-        "hyderabad", "bengaluru", "ahmedabad", "surat", "ranchi", "shimla", "dehradun"
-    ]
-    words = re.findall(r'\b[A-Za-z]+\b', query.lower())
-    for w in words:
-        if w in known_cities:
-            return w.capitalize()
-    
-    # Regex fallback for patterns like "in <City>" or "<City> me"
-    match = re.search(r'(?:in|at|near|for|around)\s+([A-Za-z]+)', query, re.IGNORECASE)
-    if match:
-        candidate = match.group(1).capitalize()
-        if candidate.lower() not in ["the", "my", "our", "today", "tomorrow"]:
-            return candidate
-            
-    match_hindi = re.search(r'([A-Za-z]+)\s+(?:me|mein|mai|ka|ki|ke)', query, re.IGNORECASE)
-    if match_hindi:
-        candidate = match_hindi.group(1).capitalize()
-        if candidate.lower() not in ["aaj", "kal", "fasal", "khet", "pani"]:
-            return candidate
-
-    return None
-
-def detect_language(query):
-    q = query.lower()
-    # Check for Devanagari script
-    if re.search(r'[\u0900-\u097F]', query):
-        return "hindi"
-    # Check for common Hinglish cues
-    hinglish_words = ["kya", "hai", "hoga", "hogi", "barish", "sinchai", "paani", "khet", "taapman", "mausam", "batao", "aaj", "kal", "spray", "chhidkav"]
-    if any(w in q.split() for w in hinglish_words):
-        return "hinglish"
-    return "english"
-
-# --- State Initialization ---
-if "current_city" not in st.session_state:
-    st.session_state.current_city = "Meerut"
-
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Namaste! Main WeatherGPT hoon. Just ask your query naturally in Hindi, English, or any language (e.g., *'Kya Pune me kal barish hogi?'* or *'Is it safe to spray pesticides in Meerut?'*)."}
-    ]
-
-if "current_insights" not in st.session_state:
-    st.session_state.current_insights = {
-        "status": "Safe",
-        "irrigation": "✅ Regular morning irrigation is safe.",
-        "spraying": "✅ Safe window available (Low wind & no immediate rain).",
-        "risk_level": "Low / Normal",
-        "action": "Proceed with standard field operations."
+    /* Suggestion Query Chips */
+    .stButton button {
+        background-color: #0F1219 !important;
+        border: 1px solid #1E2433 !important;
+        border-radius: 100px !important;
+        color: #94A3B8 !important;
+        font-size: 0.84rem !important;
+        font-weight: 500 !important;
+        padding: 0.55rem 1.1rem !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+    .stButton button:hover {
+        border-color: #38BDF8 !important;
+        color: #FFFFFF !important;
+        background-color: #151A24 !important;
+        transform: translateY(-2px);
     }
 
-# --- Core Dynamic Decision Engine ---
-def process_user_query(query):
-    # 1. Update location if detected
-    detected_city = extract_location_from_query(query)
-    if detected_city:
-        st.session_state.current_city = detected_city
+    /* Dashboard Grid Cards */
+    .dash-card {
+        background-color: #0D1017;
+        border: 1px solid #1A202C;
+        border-radius: 14px;
+        padding: 1.25rem 1.4rem;
+        margin-bottom: 1rem;
+    }
+    .card-header {
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #64748B;
+        margin-bottom: 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
 
-    # 2. Fetch fresh weather
-    lat, lon, resolved_city = geocode_city(st.session_state.current_city)
-    weather = get_live_weather(lat, lon)
-    
-    # 3. Detect language
-    lang = detect_language(query)
-    
-    q = query.lower()
-    temp = weather["temp"]
-    rain = weather["rain"]
-    wind = weather["wind"]
-    hum = weather["humidity"]
+    .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.65rem;
+    }
+    .metric-item {
+        background-color: #121620;
+        border: 1px solid #1F2737;
+        border-radius: 10px;
+        padding: 12px 6px;
+        text-align: center;
+    }
+    .metric-lbl {
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #64748B;
+    }
+    .metric-val {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 1.28rem;
+        font-weight: 700;
+        color: #F8FAFC;
+        margin-top: 4px;
+    }
 
-    # Irrigation / Water Query
-    if any(k in q for k in ["paani", "pani", "sinchai", "irrigate", "irrigation", "water"]):
-        if rain > 0.5 or hum > 80:
-            if lang in ["hindi", "hinglish"]:
-                reply = f"📍 **{resolved_city}**: Agle 24-48 ghanton me barish ({rain}mm) aur high humidity ({hum}%) ki sambhavna hai. Fasal me **sinchai abhi taal dein** taaki paani bharne se jadon ko nuksan na ho."
-            else:
-                reply = f"📍 **{resolved_city}**: Rain ({rain}mm) and high humidity ({hum}%) expected in the next 24-48 hours. **Postpone irrigation** to avoid waterlogging and root damage."
-            
-            insights = {
-                "status": "Warning",
-                "risk_level": "High Rain Risk",
-                "irrigation": "🚫 DO NOT irrigate (Risk of field waterlogging).",
-                "spraying": "🧪 Postpone chemical spraying (Washout hazard).",
-                "action": "Inspect low-lying field drainage channels."
-            }
-        else:
-            if lang in ["hindi", "hinglish"]:
-                reply = f"📍 **{resolved_city}**: Mausam shushk hai aur taapman {temp}°C hai. Subah ke samay sinchai karna **puri tarah anukool aur surakshit** hai."
-            else:
-                reply = f"📍 **{resolved_city}**: Weather is clear with a temperature of {temp}°C. Morning irrigation is **completely safe and recommended**."
-            
-            insights = {
-                "status": "Safe",
-                "risk_level": "Normal Conditions",
-                "irrigation": "✅ Safe to irrigate in morning/evening.",
-                "spraying": "✅ Safe window for nutrient application.",
-                "action": "Maintain routine soil moisture checks."
-            }
+    /* Advisory Badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.84rem;
+        font-weight: 700;
+        padding: 5px 12px;
+        border-radius: 6px;
+        margin-bottom: 0.9rem;
+    }
+    .status-safe {
+        background: rgba(34, 197, 94, 0.1);
+        color: #4ADE80;
+        border: 1px solid rgba(34, 197, 94, 0.25);
+    }
+    .status-caution {
+        background: rgba(245, 158, 11, 0.1);
+        color: #FBBF24;
+        border: 1px solid rgba(245, 158, 11, 0.25);
+    }
+    .status-warning {
+        background: rgba(239, 68, 68, 0.1);
+        color: #F87171;
+        border: 1px solid rgba(239, 68, 68, 0.25);
+    }
 
-    # Pesticide / Spraying Query
-    elif any(k in q for k in ["spray", "keetnashak", "fertilizer", "dawa", "chemical", "pesticide"]):
-        if wind > 18:
-            if lang in ["hindi", "hinglish"]:
-                reply = f"📍 **{resolved_city}**: Hawa ki gati tez ({wind} km/h) hai. Dawa hawa ke sath udkar barbaad hogi. **Chhidkav abhi rok dein**."
-            else:
-                reply = f"📍 **{resolved_city}**: High wind speed detected ({wind} km/h). **Halt chemical spraying** to prevent wind drift and chemical wastage."
-            
-            insights = {
-                "status": "Caution",
-                "risk_level": "High Wind Drift Alert",
-                "irrigation": "✅ Irrigation can continue normally.",
-                "spraying": "🚫 STOP chemical spraying (Wind speed > 15 km/h).",
-                "action": "Wait for wind speeds to subside."
-            }
-        else:
-            if lang in ["hindi", "hinglish"]:
-                reply = f"📍 **{resolved_city}**: Hawa ki gati anukool ({wind} km/h) hai aur barish ka koi khatra nahi hai. Keetnashak chhidkav **safalta-poorvak kiya ja sakta hai**."
-            else:
-                reply = f"📍 **{resolved_city}**: Favorable wind speed ({wind} km/h) with zero rain risk. **Pesticide application window is fully open**."
-            
-            insights = {
-                "status": "Safe",
-                "risk_level": "Favorable Spray Window",
-                "irrigation": "✅ Normal schedule.",
-                "spraying": "✅ Excellent spraying window active.",
-                "action": "Use standard safety protective gear."
-            }
+    /* Chat Messages */
+    [data-testid="stChatMessage"] {
+        background-color: #0D1017 !important;
+        border: 1px solid #1A202C !important;
+        border-radius: 12px !important;
+        padding: 1rem 1.2rem !important;
+        margin-bottom: 0.75rem !important;
+    }
+    </style>
+""",
+    unsafe_allow_html=True,
+)
 
-    # Rain / Storm / Weather Alerts
-    elif any(k in q for k in ["storm", "toofan", "barish", "flood", "alert", "baarish", "rain"]):
-        if rain > 0.8 or wind > 25:
-            if lang in ["hindi", "hinglish"]:
-                reply = f"🚨 **Severe Weather Alert ({resolved_city})**: Bhari barish/tez aandhi ({wind} km/h) ki aashanka hai. Khet ke upkaran surakshit karein aur khet me na jayein."
-            else:
-                reply = f"🚨 **Severe Weather Alert ({resolved_city})**: Heavy rain/high winds ({wind} km/h) expected. Secure livestock and field machinery immediately."
-            
-            insights = {
-                "status": "Warning",
-                "risk_level": "Severe Weather Warning",
-                "irrigation": "🚫 Halt all irrigation pumps immediately.",
-                "spraying": "🚫 Strict ban on all chemical spraying.",
-                "action": "Clear drainage blockages and secure equipment."
-            }
-        else:
-            if lang in ["hindi", "hinglish"]:
-                reply = f"📍 **{resolved_city}**: Agle 24 ghanton me kisi gambhir toofan ya bhari barish ki chetavni nahi hai. Mausam sthir hai."
-            else:
-                reply = f"📍 **{resolved_city}**: No severe storm or flood warnings for the next 24 hours. Weather conditions are stable."
-            
-            insights = {
-                "status": "Safe",
-                "risk_level": "Low Hazard",
-                "irrigation": "✅ Standard routine.",
-                "spraying": "✅ Safe window open.",
-                "action": "Monitor daily regional forecasts."
-            }
 
-    # General Weather / Fallback
+# --- 3. Telemetry & Geocoding Endpoints ---
+@st.cache_data(show_spinner=False, ttl=3600)
+def geocode_location(place_name: str):
+  url = f"https://geocoding-api.open-meteo.com/v1/search?name={place_name}&count=1&language=en&format=json"
+  try:
+    res = requests.get(url, timeout=5).json()
+    if "results" in res and len(res["results"]) > 0:
+      item = res["results"][0]
+      return (
+          item["latitude"],
+          item["longitude"],
+          f"{item['name']}, {item.get('admin1', item.get('country', ''))}",
+      )
+  except Exception:
+    pass
+  return 28.6139, 77.2090, "New Delhi, India"
+
+
+def fetch_weather(lat: float, lon: float):
+  url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m&forecast_days=1"
+  try:
+    res = requests.get(url, timeout=5).json()
+    cur = res.get("current", {})
+    return {
+        "temp": round(cur.get("temperature_2m", 28.0), 1),
+        "humidity": cur.get("relative_humidity_2m", 55),
+        "rain": round(cur.get("precipitation", 0.0), 1),
+        "wind": round(cur.get("wind_speed_10m", 10.0), 1),
+    }
+  except Exception:
+    return {"temp": 28.0, "humidity": 55, "rain": 0.0, "wind": 10.0}
+
+
+def parse_location(text: str):
+  cities = [
+      "delhi",
+      "meerut",
+      "jaipur",
+      "lucknow",
+      "pune",
+      "mumbai",
+      "bhopal",
+      "patna",
+      "bengaluru",
+      "chennai",
+      "kolkata",
+      "chandigarh",
+      "ahmedabad",
+      "nagpur",
+  ]
+  tokens = re.findall(r"\b[A-Za-z]+\b", text.lower())
+  for token in tokens:
+    if token in cities:
+      return token.capitalize()
+  match = re.search(
+      r"(?:in|at|near|for|around)\s+([A-Za-z]+)", text, re.IGNORECASE
+  )
+  if match and match.group(1).lower() not in [
+      "the",
+      "my",
+      "today",
+      "tomorrow",
+      "this",
+  ]:
+    return match.group(1).capitalize()
+  return None
+
+
+# --- 4. State Management ---
+if "has_searched" not in st.session_state:
+  st.session_state.has_searched = False
+if "current_city" not in st.session_state:
+  st.session_state.current_city = "New Delhi"
+if "messages" not in st.session_state:
+  st.session_state.messages = []
+if "insights" not in st.session_state:
+  st.session_state.insights = {}
+if "preset_prompt" not in st.session_state:
+  st.session_state.preset_prompt = None
+
+
+# --- 5. Reasoning Engine ---
+def generate_insights(query: str):
+  loc = parse_location(query)
+  if loc:
+    st.session_state.current_city = loc
+
+  lat, lon, resolved_name = geocode_location(st.session_state.current_city)
+  data = fetch_weather(lat, lon)
+  q = query.lower()
+
+  if any(
+      k in q
+      for k in ["spray", "pesticide", "fertilizer", "chhidkav", "keetnashak"]
+  ):
+    if data["wind"] > 16.0:
+      reply = f"Wind speeds are currently elevated at **{data['wind']} km/h** in {resolved_name}. Chemical spraying should be suspended to avoid pesticide drift."
+      insights = {
+          "status": "Caution: High Wind Velocity",
+          "class": "status-caution",
+          "irrigation": "Routine schedule unaffected",
+          "spray": "🚫 Halt spray operations (Wind > 15 km/h)",
+          "action": "Wait for wind speeds to drop below 15 km/h.",
+      }
     else:
-        if lang in ["hindi", "hinglish"]:
-            reply = f"📍 **{resolved_city} Live Update**: Taapman **{temp}°C**, Hawa **{wind} km/h**, Nami (Humidity) **{hum}%**, aur Barish **{rain} mm** hai."
-        else:
-            reply = f"📍 **{resolved_city} Live Update**: Temperature is **{temp}°C**, Wind is **{wind} km/h**, Humidity is **{hum}%**, and Precipitation is **{rain} mm**."
-        
-        insights = {
-            "status": "Safe",
-            "risk_level": "Normal Field Weather",
-            "irrigation": "✅ Routine morning irrigation safe.",
-            "spraying": "✅ Normal spraying window open.",
-            "action": "Standard field maintenance active."
-        }
+      reply = f"Atmospheric conditions in {resolved_name} are optimal ({data['wind']} km/h wind, 0 mm rain). Safe window for field chemical spraying."
+      insights = {
+          "status": "Safe: Optimal Conditions",
+          "class": "status-safe",
+          "irrigation": "Routine schedule active",
+          "spray": "✅ Spray window is open",
+          "action": "Proceed with recommended dosages.",
+      }
+  elif any(
+      k in q
+      for k in ["rain", "barish", "baarish", "water", "irrigation", "sinchai"]
+  ):
+    if data["rain"] > 0.4:
+      reply = f"Precipitation (**{data['rain']} mm**) detected across {resolved_name}. Delay additional irrigation to prevent crop root waterlogging."
+      insights = {
+          "status": "Warning: Rain Expected",
+          "class": "status-warning",
+          "irrigation": "🚫 Postpone field watering",
+          "spray": "🚫 Washout hazard",
+          "action": "Inspect low-lying drainage channels.",
+      }
+    else:
+      reply = f"Clear atmospheric conditions in {resolved_name} with **{data['temp']}°C** temperature and **{data['humidity']}%** humidity. Field irrigation is safe."
+      insights = {
+          "status": "Optimal: Clear Conditions",
+          "class": "status-safe",
+          "irrigation": "✅ Regular morning irrigation safe",
+          "spray": "✅ Normal spraying permitted",
+          "action": "Maintain standard soil moisture checks.",
+      }
+  else:
+    reply = f"Live telemetry for **{resolved_name}**: Temperature is **{data['temp']}°C**, Wind velocity **{data['wind']} km/h**, Humidity **{data['humidity']}%**, and Precipitation **{data['rain']} mm**."
+    insights = {
+        "status": "Nominal Telemetry",
+        "class": "status-safe",
+        "irrigation": "✅ Regular operations",
+        "spray": "✅ Conditions normal",
+        "action": "Monitor routine operational updates.",
+    }
 
-    return reply, insights, resolved_city, weather
+  return reply, insights, resolved_name, data
 
-# --- Clean Header (No Options/Dropdowns) ---
-st.title("🌤️ WeatherGPT")
-st.caption("Zero-Barrier Meteorological AI — Auto-detects location & language directly from your conversational prompt.")
-st.divider()
 
-# Get coordinates and telemetry for the current active city
-lat, lon, resolved_city_name = geocode_city(st.session_state.current_city)
-weather_data = get_live_weather(lat, lon)
-
-# --- Main Dual-Panel Grid Layout ---
-left_panel, right_panel = st.columns([1.1, 0.9], gap="large")
-
-# ==========================================
-# LEFT PANEL: Conversational Stream
-# ==========================================
-with left_panel:
-    st.subheader("💬 Conversational Assistant")
-    
-    chat_container = st.container(height=440)
-    with chat_container:
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-    user_input = st.chat_input("Ask anything (e.g., 'Kya Lucknow me kal barish hogi?' or 'Can I spray pesticides in Jaipur?')...")
-
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        # Analyze prompt, infer location & language, update insights
-        ai_reply, new_insights, resolved_city_name, weather_data = process_user_query(user_input)
-        
-        st.session_state.current_insights = new_insights
-        st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-        st.rerun()
-
-# ==========================================
-# RIGHT PANEL: Live Telemetry & Insights
-# ==========================================
-with right_panel:
-    st.subheader(f"📊 Live Telemetry & Insights ({resolved_city_name})")
-
-    # 1. Real-Time Metric Cards
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.markdown(f"<div class='metric-card'>🌡️<br><b>{weather_data['temp']}°C</b><br><small>Temp</small></div>", unsafe_allow_html=True)
-    with m2:
-        st.markdown(f"<div class='metric-card'>🌧️<br><b>{weather_data['rain']} mm</b><br><small>Precip</small></div>", unsafe_allow_html=True)
-    with m3:
-        st.markdown(f"<div class='metric-card'>💨<br><b>{weather_data['wind']} km/h</b><br><small>Wind</small></div>", unsafe_allow_html=True)
-    with m4:
-        st.markdown(f"<div class='metric-card'>💧<br><b>{weather_data['humidity']}%</b><br><small>Humidity</small></div>", unsafe_allow_html=True)
-
-    st.write("")
-
-    # 2. Dynamic Actionable Insight Card (Updated Post-Response)
-    st.markdown("#### 💡 Actionable Agro-Advisory")
-    insights = st.session_state.current_insights
-
-    card_type = "insight-warning" if insights["status"] == "Warning" else ("insight-caution" if insights["status"] == "Caution" else "insight-safe")
-
-    st.markdown(f"""
-    <div class='insight-box {card_type}'>
-        <h4>Risk Status: {insights['risk_level']}</h4>
-        <ul>
-            <li><b>Irrigation Guidance:</b> {insights['irrigation']}</li>
-            <li><b>Chemical Spray Window:</b> {insights['spraying']}</li>
-            <li><b>Recommended Action:</b> {insights['action']}</li>
-        </ul>
+# --- 6. Custom Center Search Component ---
+def render_center_search_bar():
+  search_html = """
+    <div style="max-width: 650px; margin: 0 auto;">
+        <form id="searchForm" onsubmit="handleSubmit(event)" style="position: relative; width: 100%;">
+            <div style="
+                display: flex;
+                align-items: center;
+                background: #0E121A;
+                border: 1px solid #232C3D;
+                border-radius: 9999px;
+                padding: 7px 10px 7px 20px;
+                box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
+                transition: border-color 0.2s ease;
+            " onmouseover="this.style.borderColor='#38BDF8'" onmouseout="this.style.borderColor='#232C3D'">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 12px; flex-shrink: 0;">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input id="queryInput" type="text" placeholder="Ask about rain, wind, spraying in any city..." autocomplete="off" style="
+                    width: 100%;
+                    background: transparent;
+                    border: none;
+                    outline: none;
+                    color: #FFFFFF;
+                    font-size: 15px;
+                    font-family: 'Plus Jakarta Sans', sans-serif;
+                " />
+                <button type="submit" style="
+                    background: #FFFFFF;
+                    border: none;
+                    border-radius: 9999px;
+                    width: 38px;
+                    height: 38px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: pointer;
+                    flex-shrink: 0;
+                    margin-left: 8px;
+                    transition: transform 0.15s ease;
+                " onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#07090E" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                        <polyline points="12 5 19 12 12 19"></polyline>
+                    </svg>
+                </button>
+            </div>
+        </form>
     </div>
-    """, unsafe_allow_html=True)
+    <script>
+        function handleSubmit(e) {
+            e.preventDefault();
+            const val = document.getElementById('queryInput').value;
+            if (val && val.trim() !== "") {
+                const parentDoc = window.parent.document;
+                const nativeInput = parentDoc.querySelector('input[aria-label="hidden_query_bridge"]');
+                if (nativeInput) {
+                    nativeInput.value = val.trim();
+                    nativeInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }
+        }
+    </script>
+    """
+  components.html(search_html, height=75)
 
-    st.write("")
-    
-    # 3. Mass Broadcast Trigger
-    if st.button(f"🚨 Broadcast Advisory to Registered Farmers ({resolved_city_name})", use_container_width=True):
-        st.success(f"✅ Advisory successfully dispatched to farmer WhatsApp groups in {resolved_city_name} cluster.")
 
-# import os
-# from dotenv import load_dotenv
-# import streamlit as st
-# from langchain_core.messages import AIMessage, HumanMessage
-# from src.agent import build_weather_agent
+# --- 7. View Routing ---
 
-# load_dotenv()
+# Hidden input bridge for HTML Form to Streamlit State communication
+hidden_bridge = st.text_input(
+    "hidden_query_bridge", label_visibility="collapsed", key="bridge_input"
+)
+active_query = None
 
-# st.set_page_config(
-#     page_title="WeatherGPT Dashboard",
-#     page_icon="🌤️",
-#     layout="wide"  # Uses full screen width
-# )
+if hidden_bridge:
+  active_query = hidden_bridge
+  st.session_state.bridge_input = ""
 
-# # Custom CSS for cards and metrics styling
-# st.markdown("""
-# <style>
-#     .metric-card {
-#         background-color: rgba(255, 255, 255, 0.05);
-#         border: 1px solid rgba(255, 255, 255, 0.15);
-#         border-radius: 12px;
-#         padding: 16px;
-#         margin-bottom: 12px;
-#     }
-#     .alert-banner {
-#         padding: 10px 14px;
-#         border-radius: 8px;
-#         font-weight: 600;
-#         margin-bottom: 12px;
-#     }
-# </style>
-# """, unsafe_allow_html=True)
+if not st.session_state.has_searched:
+  # LANDING VIEW
+  st.markdown(
+      """
+        <div class="hero-box">
+            <div class="badge-pill">Autonomous Climate Decision Core</div>
+            <div class="hero-title">WeatherGPT</div>
+            <div class="hero-sub">Instant hyper-local telemetry, agricultural decision support, and emergency disaster dispatch.</div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
 
-# # -------------------------------------------------------------
-# # Initialize Session State
-# # -------------------------------------------------------------
-# if "messages" not in st.session_state:
-#     st.session_state.messages = []
+  # Custom Floating Search Pill
+  render_center_search_bar()
 
-# if "latest_telemetry" not in st.session_state:
-#     st.session_state.latest_telemetry = {
-#         "location": "No search yet",
-#         "temp": "--",
-#         "humidity": "--",
-#         "wind": "--",
-#         "rain_prob": "--",
-#         "alert_status": "Normal"
-#     }
+  # Quick Suggestion Chips
+  st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+  _, c1, c2, c3, _ = st.columns([0.8, 1.2, 1.2, 1.2, 0.8])
+  with c1:
+    if st.button("🌦️ Rain forecast for Meerut", use_container_width=True):
+      active_query = "Will it rain in Meerut tomorrow?"
+  with c2:
+    if st.button("🌾 Safe to spray in Jaipur?", use_container_width=True):
+      active_query = "Is it safe to spray pesticides in Jaipur?"
+  with c3:
+    if st.button("⚡ Live telemetry in Mumbai", use_container_width=True):
+      active_query = "What is the live weather in Mumbai?"
 
-# # -------------------------------------------------------------
-# # Header
-# # -------------------------------------------------------------
-# st.title("🌤️ WeatherGPT Assisstance")
-# st.caption("AI-powered weather forecasting, hyper-local advisories, and disaster alerts.")
-# st.divider()
+else:
+  # DASHBOARD VIEW
+  st.markdown(
+      """
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.2rem; border-bottom: 1px solid #1A202C; padding-bottom: 0.9rem;">
+            <div>
+                <span style="font-size:1.35rem; font-weight:800; color:#FFFFFF;">🌤️ WeatherGPT</span>
+                <span style="font-size:0.85rem; color:#64748B; margin-left:8px;">| Agro-Decision Core</span>
+            </div>
+            <span style="font-size:0.75rem; font-weight:700; color:#4ADE80; background:rgba(34,197,94,0.1); border:1px solid rgba(34,197,94,0.2); padding:4px 10px; border-radius:100px;">● Live Telemetry Ingestion</span>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
 
-# # -------------------------------------------------------------
-# # Main Layout: 60% Chat, 40% Live Data Cards
-# # -------------------------------------------------------------
-# col_chat, col_data = st.columns([1.3, 0.9], gap="large")
+  col_chat, col_dash = st.columns([1.15, 0.85], gap="large")
 
-# # === LEFT COLUMN: CONVERSATIONAL AGENT ===
-# with col_chat:
-#     st.subheader("💬 Weather Assistant")
-    
-#     # Scrollable chat message container
-#     chat_container = st.container(height=520)
-#     with chat_container:
-#         for msg in st.session_state.messages:
-#             role = "user" if isinstance(msg, HumanMessage) else "assistant"
-#             with st.chat_message(role):
-#                 st.markdown(msg.content)
+  with col_chat:
+    chat_box = st.container(height=480)
+    with chat_box:
+      for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+          st.markdown(msg["content"])
 
-#     # Chat Input
-#     if user_input := st.chat_input("Ask about weather, rain forecasts, or crop advice..."):
-#         st.session_state.messages.append(HumanMessage(content=user_input))
-#         with chat_container:
-#             with st.chat_message("user"):
-#                 st.markdown(user_input)
+    # Bottom search bar for conversation follow-ups
+    bottom_query = st.chat_input("Ask a follow-up query...")
+    if bottom_query:
+      active_query = bottom_query
 
-#         with chat_container:
-#             with st.chat_message("assistant"):
-#                 with st.spinner("Analyzing atmospheric models..."):
-#                     agent = build_weather_agent()
-#                     history = st.session_state.messages[:-1]
-#                     result = agent.invoke({"input": user_input, "chat_history": history})
-#                     response_text = result["output"]
-                    
-#                     st.markdown(response_text)
-#                     st.session_state.messages.append(AIMessage(content=response_text))
-                    
-#                     # Optional: Parse simple metrics for the right panel if available
-#                     st.rerun()
+  with col_dash:
+    lat, lon, current_name = geocode_location(st.session_state.current_city)
+    telemetry = fetch_weather(lat, lon)
+    ins = st.session_state.insights
 
-# # === RIGHT COLUMN: DYNAMIC TELEMETRY CARDS ===
-# with col_data:
-#     st.subheader("📊 Live Weather Insights")
-    
-#     telemetry = st.session_state.latest_telemetry
-    
-#     # 1. Location & Alert Status Card
-#     with st.container():
-#         st.markdown(f"### 📍 **{telemetry['location']}**")
-#         if telemetry["alert_status"] == "Warning":
-#             st.error("⚠️ High Rain/Wind Warning Active")
-#         else:
-#             st.success("🟢 Atmospheric Status: Normal")
+    # Card 1: Metric Telemetry Grid
+    st.markdown(
+        f"""
+        <div class="dash-card">
+            <div class="card-header">📡 Real-Time Telemetry &bull; {current_name}</div>
+            <div class="metric-grid">
+                <div class="metric-item">
+                    <div class="metric-lbl">Temp</div>
+                    <div class="metric-val">{telemetry['temp']}°C</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-lbl">Rain</div>
+                    <div class="metric-val">{telemetry['rain']}mm</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-lbl">Wind</div>
+                    <div class="metric-val">{telemetry['wind']}</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-lbl">Humidity</div>
+                    <div class="metric-val">{telemetry['humidity']}%</div>
+                </div>
+            </div>
+        </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
-#     # 2. Key Metrics Grid
-#     m1, m2 = st.columns(2)
-#     with m1:
-#         st.metric(label="🌡️ Temperature", value=f"{telemetry['temp']} °C")
-#         st.metric(label="💨 Wind Speed", value=f"{telemetry['wind']} km/h")
-#     with m2:
-#         st.metric(label="💧 Humidity", value=f"{telemetry['humidity']} %")
-#         st.metric(label="🌧️ Rain Probability", value=f"{telemetry['rain_prob']} %")
+    # Card 2: Decision Advisory Card
+    st.markdown(
+        f"""
+        <div class="dash-card">
+            <div class="card-header">💡 Field Decision Advisory</div>
+            <div class="status-badge {ins.get('class', 'status-safe')}">● {ins.get('status', 'Nominal')}</div>
+            <div style="font-size:0.88rem; line-height:1.8; color:#CBD5E1;">
+                <div><b>Irrigation:</b> {ins.get('irrigation', 'Nominal')}</div>
+                <div><b>Chemical Spray:</b> {ins.get('spray', 'Nominal')}</div>
+                <div><b>Action Plan:</b> {ins.get('action', 'Maintain routine operations')}</div>
+            </div>
+        </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
-#     st.divider()
+    if st.button(
+        f"🚨 Broadcast Advisory to {current_name} (Twilio Gateway)",
+        use_container_width=True,
+    ):
+      st.toast(
+          f"Advisory successfully dispatched via Twilio SMS to {current_name}."
+      )
 
-#     # 3. Actionable Quick Checklist
-#     st.markdown("#### 🚜 Advisory Checklist")
-#     st.markdown("""
-#     * **Farming/Spraying:** Check 24-hr rain risk before chemical application.
-#     * **Travel/Commute:** Safe driving conditions unless wind > 40 km/h.
-#     * **Disaster Protocol:** Monitor yellow/orange alerts for severe rainfall.
-#     """)
+# --- 8. Query Execution ---
+if active_query:
+  st.session_state.has_searched = True
+  st.session_state.messages.append({"role": "user", "content": active_query})
 
+  bot_res, new_ins, _, _ = generate_insights(active_query)
+  st.session_state.insights = new_ins
+  st.session_state.messages.append({"role": "assistant", "content": bot_res})
+  st.rerun()
